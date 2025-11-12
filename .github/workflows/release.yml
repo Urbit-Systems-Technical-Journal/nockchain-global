@@ -47,33 +47,6 @@ jobs:
             echo "version=pr-${{ github.event.number }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Extract Cargo versions
-        id: cargo-versions
-        run: |
-          HOON_VERSION=$(sed -n '/\[workspace.package\]/,/\[/p' Cargo.toml | grep '^version' | cut -d'"' -f2)
-          HOONC_VERSION=$(grep '^version' crates/hoonc/Cargo.toml | cut -d'"' -f2)
-          
-          # For nightly, append date
-          if [[ "${{ steps.channel.outputs.channel }}" == "nightly" ]]; then
-            DATE=$(date +%Y%m%d)
-            HOON_VERSION="${HOON_VERSION}-${DATE}"
-            HOONC_VERSION="${HOONC_VERSION}-${DATE}"
-          fi
-          
-          # Debug output
-          echo "HOON_VERSION='$HOON_VERSION'"
-          echo "HOONC_VERSION='$HOONC_VERSION'"
-          
-          # Validate versions
-          if [[ -z "$HOON_VERSION" || -z "$HOONC_VERSION" ]]; then
-            echo "Error: Missing version in one or more Cargo.toml files"
-            exit 1
-          fi
-          
-          echo "hoon_version=$HOON_VERSION" >> $GITHUB_OUTPUT
-          echo "hoonc_version=$HOONC_VERSION" >> $GITHUB_OUTPUT
-          echo "Extracted versions: hoon=$HOON_VERSION, hoonc=$HOONC_VERSION"
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -86,6 +59,8 @@ jobs:
         run: |
           # Install blake3 hash tool for manifest generation
           cargo install b3sum
+          # Ensure cargo binaries are on PATH
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           # Install jq for JSON parsing
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             sudo apt-get update
@@ -107,15 +82,22 @@ jobs:
       - name: Set up GPG
         if: matrix.os == 'ubuntu-latest' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
         run: |
-          # Import GPG private key
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | tr -d '\n' | base64 -d | gpg --batch --import
+          # Import GPG private key securely
+          printf '%s' "${{ secrets.GPG_PRIVATE_KEY }}" | base64 --decode > /tmp/gpg_private.key
+          gpg --batch --import /tmp/gpg_private.key
+          shred -u /tmp/gpg_private.key || rm -f /tmp/gpg_private.key
+
           # Configure GPG for non-interactive use
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
           echo "use-agent" >> ~/.gnupg/gpg.conf
           echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
           echo "batch" >> ~/.gnupg/gpg.conf
+
           # Get the full fingerprint and trust the key
-          FINGERPRINT=$(gpg --list-secret-keys --with-colons | grep '^fpr:' | head -1 | cut -d: -f10)
+          FINGERPRINT=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
           echo "${FINGERPRINT}:6:" | gpg --import-ownertrust
+
           # Verify key is available
           gpg --list-secret-keys
 
@@ -123,8 +105,6 @@ jobs:
         run: |
           mkdir -p dist
           CHANNEL="${{ steps.channel.outputs.channel }}"
-          HOON_VERSION="${{ steps.cargo-versions.outputs.hoon_version }}"
-          HOONC_VERSION="${{ steps.cargo-versions.outputs.hoonc_version }}"
           SHOULD_SIGN="${{ matrix.os == 'ubuntu-latest' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag') }}"
           
           if [[ "$CHANNEL" == "pr" ]]; then
@@ -184,52 +164,52 @@ jobs:
         if: steps.channel.outputs.channel != 'pr'
         run: |
           mkdir -p scripts
-          
+
           # Create manifest generation script
           cat << 'EOF' > scripts/generate-manifest.sh
-          #!/bin/bash
-          set -euo pipefail
-          
-          BINARY=$1
-          TARGET=$2
-          CHANNEL=$3
-          VERSION=$4
-          COMMIT_SHA=${GITHUB_SHA:-$(git rev-parse HEAD)}
-          DATE=$(date +%Y-%m-%d)
-          
-          # Calculate hashes from the packaged archive
-          ARCHIVE_PATH="dist/${BINARY}-${CHANNEL}-latest-${TARGET}.tar.gz"
-          
-          if [ ! -f "$ARCHIVE_PATH" ]; then
-              echo "Error: Archive not found at $ARCHIVE_PATH" >&2
-              exit 1
-          fi
-          
-          BLAKE3_HASH=$(b3sum "$ARCHIVE_PATH" | cut -d' ' -f1)
-          SHA1_HASH=$(sha1sum "$ARCHIVE_PATH" 2>/dev/null | cut -d' ' -f1 || shasum -a 1 "$ARCHIVE_PATH" | cut -d' ' -f1)
-          
-          # Generate URL
-          URL="https://github.com/nockchain/nockchain/releases/download/$CHANNEL-build-$COMMIT_SHA/$BINARY-$CHANNEL-latest-$TARGET.tar.gz"
-          
-          # Generate manifest
-          cat << MANIFEST_EOF
-          manifest-version = "1"
-          date = "$DATE"
-          
-          [pkg.$BINARY]
-          version = "$VERSION"
-          components = ["core"]
-          
-          [pkg.$BINARY.target.$TARGET]
-          available = true
-          url = "$URL"
-          hash_blake3 = "$BLAKE3_HASH"
-          hash_sha1 = "$SHA1_HASH"
-          MANIFEST_EOF
-          EOF
-          
+#!/bin/bash
+set -euo pipefail
+
+BINARY=$1
+TARGET=$2
+CHANNEL=$3
+VERSION=$4
+COMMIT_SHA=${GITHUB_SHA:-$(git rev-parse HEAD)}
+DATE=$(date +%Y-%m-%d)
+
+# Calculate hashes from the packaged archive
+ARCHIVE_PATH="dist/${BINARY}-${CHANNEL}-latest-${TARGET}.tar.gz"
+
+if [ ! -f "$ARCHIVE_PATH" ]; then
+    echo "Error: Archive not found at $ARCHIVE_PATH" >&2
+    exit 1
+fi
+
+BLAKE3_HASH=$(b3sum "$ARCHIVE_PATH" | cut -d' ' -f1)
+SHA1_HASH=$(sha1sum "$ARCHIVE_PATH" 2>/dev/null | cut -d' ' -f1 || shasum -a 1 "$ARCHIVE_PATH" | cut -d' ' -f1)
+
+# Generate URL
+URL="https://github.com/nockchain/nockchain/releases/download/$CHANNEL-build-$COMMIT_SHA/$BINARY-$CHANNEL-latest-$TARGET.tar.gz"
+
+# Generate manifest
+cat << MANIFEST_EOF
+manifest-version = "1"
+date = "$DATE"
+
+[pkg.$BINARY]
+version = "$VERSION"
+components = ["core"]
+
+[pkg.$BINARY.target.$TARGET]
+available = true
+url = "$URL"
+hash_blake3 = "$BLAKE3_HASH"
+hash_sha1 = "$SHA1_HASH"
+MANIFEST_EOF
+EOF
+
           chmod +x scripts/generate-manifest.sh
-          
+
           # Generate manifests for each binary that was built
           CHANNEL="${{ steps.channel.outputs.channel }}"
           if [ -f "dist/hoon-${CHANNEL}-latest-${{ matrix.target }}.tar.gz" ]; then
@@ -257,9 +237,9 @@ jobs:
           name: ${{ steps.channel.outputs.channel }} Build ${{ github.sha }}
           files: |
             dist/hoon-${{ steps.channel.outputs.channel }}-latest-${{ matrix.target }}.tar.gz
-            ${{ matrix.os == 'ubuntu-latest' && format('dist/hoon-{0}-latest-{2}.tar.gz.asc', steps.channel.outputs.channel, steps.cargo-versions.outputs.hoon_version, matrix.target) || '' }}
+            ${{ matrix.os == 'ubuntu-latest' && format('dist/hoon-{0}-latest-{1}.tar.gz.asc', steps.channel.outputs.channel, matrix.target) || '' }}
             dist/hoonc-${{ steps.channel.outputs.channel }}-latest-${{ matrix.target }}.tar.gz
-            ${{ matrix.os == 'ubuntu-latest' && format('dist/hoonc-{0}-latest-{2}.tar.gz.asc', steps.channel.outputs.channel, steps.cargo-versions.outputs.hoonc_version, matrix.target) || '' }}
+            ${{ matrix.os == 'ubuntu-latest' && format('dist/hoonc-{0}-latest-{1}.tar.gz.asc', steps.channel.outputs.channel, matrix.target) || '' }}
 
   collate-manifests:
     name: Collate Channel Manifests
@@ -290,55 +270,55 @@ jobs:
         run: |
           mkdir -p scripts
           cat << 'EOF' > scripts/collate-manifests.sh
-          #!/bin/bash
-          set -euo pipefail
-          
-          CHANNEL=$1
-          MANIFEST_DIR=$2
-          
-          # Start with global metadata
-          cat << HEADER_EOF
-          manifest-version = "1"
-          date = "$(date +%Y-%m-%d)"
-          
-          # Profiles
-          [profiles.default]
-          components = ["core"]
-          [profiles.minimal]
-          components = ["core"]
-          
-          HEADER_EOF
-          
-          # Process manifests by package, then by target
-          for package in hoonc hoon; do
-              echo "# $package binaries"
-              
-              # Find all manifests for this package
-              find "$MANIFEST_DIR" -name "${package}-*-manifest.toml" -type f | sort | while read manifest; do
-                  if [ -f "$manifest" ]; then
-                      echo "# From $(basename "$manifest")"
-                      # Extract only the target-specific sections
-                      awk -v pkg="$package" '
-                          /^\[pkg\./ { 
-                              if ($0 ~ "\\[pkg\\." pkg "\\.target\\.") {
-                                  printing = 1
-                              } else {
-                                  printing = 0
-                              }
-                          }
-                          /^available|^url|^hash_/ { 
-                              if (printing) print
-                          }
-                          /^\[pkg\..*\.target\./ {
-                              if (printing) print
-                          }
-                      ' "$manifest"
-                      echo ""
-                  fi
-              done
-          done
-          EOF
-          
+#!/bin/bash
+set -euo pipefail
+
+CHANNEL=$1
+MANIFEST_DIR=$2
+
+# Start with global metadata
+cat << HEADER_EOF
+manifest-version = "1"
+date = "$(date +%Y-%m-%d)"
+
+# Profiles
+[profiles.default]
+components = ["core"]
+[profiles.minimal]
+components = ["core"]
+
+HEADER_EOF
+
+# Process manifests by package, then by target
+for package in hoonc hoon; do
+    echo "# $package binaries"
+
+    # Find all manifests for this package
+    find "$MANIFEST_DIR" -name "${package}-*-manifest.toml" -type f | sort | while read manifest; do
+        if [ -f "$manifest" ]; then
+            echo "# From $(basename "$manifest")"
+            # Extract only the target-specific sections
+            awk -v pkg="$package" '
+                /^\[pkg\./ {
+                    if ($0 ~ "\\[pkg\\." pkg "\\.target\\.") {
+                        printing = 1
+                    } else {
+                        printing = 0
+                    }
+                }
+                /^available|^url|^hash_/ {
+                    if (printing) print
+                }
+                /^\[pkg\..*\.target\./ {
+                    if (printing) print
+                }
+            ' "$manifest"
+            echo ""
+        fi
+    done
+done
+EOF
+
           chmod +x scripts/collate-manifests.sh
           
       - name: Determine channel from ref
