@@ -18,7 +18,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
     permissions:
-      contents: write  # Required for action-gh-release
+      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -50,38 +50,29 @@ jobs:
       - name: Extract Cargo versions
         id: cargo-versions
         run: |
-          # Get workspace version - simpler approach
           HOON_VERSION=$(sed -n '/\[workspace.package\]/,/\[/p' Cargo.toml | grep '^version' | cut -d'"' -f2)
-          
-          # Get hoonc version
           HOONC_VERSION=$(grep '^version' crates/hoonc/Cargo.toml | cut -d'"' -f2)
-          
-          # Get nockup version  
-          NOCKUP_VERSION=$(grep '^version' crates/nockup/Cargo.toml | cut -d'"' -f2)
           
           # For nightly, append date
           if [[ "${{ steps.channel.outputs.channel }}" == "nightly" ]]; then
             DATE=$(date +%Y%m%d)
             HOON_VERSION="${HOON_VERSION}-${DATE}"
             HOONC_VERSION="${HOONC_VERSION}-${DATE}"
-            NOCKUP_VERSION="${NOCKUP_VERSION}-${DATE}"
           fi
           
           # Debug output
           echo "HOON_VERSION='$HOON_VERSION'"
           echo "HOONC_VERSION='$HOONC_VERSION'"
-          echo "NOCKUP_VERSION='$NOCKUP_VERSION'"
           
           # Validate versions
-          if [[ -z "$HOON_VERSION" || -z "$HOONC_VERSION" || -z "$NOCKUP_VERSION" ]]; then
+          if [[ -z "$HOON_VERSION" || -z "$HOONC_VERSION" ]]; then
             echo "Error: Missing version in one or more Cargo.toml files"
             exit 1
           fi
           
           echo "hoon_version=$HOON_VERSION" >> $GITHUB_OUTPUT
           echo "hoonc_version=$HOONC_VERSION" >> $GITHUB_OUTPUT
-          echo "nockup_version=$NOCKUP_VERSION" >> $GITHUB_OUTPUT
-          echo "Extracted versions: hoon=$HOON_VERSION, hoonc=$HOONC_VERSION, nockup=$NOCKUP_VERSION"
+          echo "Extracted versions: hoon=$HOON_VERSION, hoonc=$HOONC_VERSION"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -113,11 +104,6 @@ jobs:
           cargo build --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml --locked
           file target/release/hoonc
 
-      - name: Build nockup
-        run: |
-          cargo build --release --bin nockup --manifest-path crates/nockup/Cargo.toml --locked
-          file target/release/nockup
-
       - name: Set up GPG
         if: matrix.os == 'ubuntu-latest' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
         run: |
@@ -139,7 +125,6 @@ jobs:
           CHANNEL="${{ steps.channel.outputs.channel }}"
           HOON_VERSION="${{ steps.cargo-versions.outputs.hoon_version }}"
           HOONC_VERSION="${{ steps.cargo-versions.outputs.hoonc_version }}"
-          NOCKUP_VERSION="${{ steps.cargo-versions.outputs.nockup_version }}"
           SHOULD_SIGN="${{ matrix.os == 'ubuntu-latest' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag') }}"
           
           if [[ "$CHANNEL" == "pr" ]]; then
@@ -160,12 +145,6 @@ jobs:
           else
             echo "Skipping hoonc copy: binary missing"
           fi
-          if [ -f target/release/nockup ]; then
-            cp target/release/nockup dist/nockup
-            chmod +x dist/nockup
-          else
-            echo "Skipping nockup copy: binary missing"
-          fi
           
           # Sign individual binaries if this is a release build
           if [[ "$SHOULD_SIGN" == "true" ]]; then
@@ -177,10 +156,6 @@ jobs:
             if [ -f dist/hoonc ]; then
               echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback --detach-sign --armor --default-key "${{ secrets.GPG_KEY_ID }}" dist/hoonc
               echo "Created dist/hoonc.asc"
-            fi
-            if [ -f dist/nockup ]; then
-              echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback --detach-sign --armor --default-key "${{ secrets.GPG_KEY_ID }}" dist/nockup
-              echo "Created dist/nockup.asc"
             fi
           else
             echo "Skipping binary signing for non-release builds"
@@ -199,13 +174,6 @@ jobs:
             # Sign the archive if this is a release build
             if [[ "$SHOULD_SIGN" == "true" ]]; then
               gpg --batch --yes --pinentry-mode loopback --detach-sign --armor --default-key "${{ secrets.GPG_KEY_ID }}" dist/hoonc-${CHANNEL}-latest-${{ matrix.target }}.tar.gz
-            fi
-          fi
-          if [ -f dist/nockup ]; then
-            tar -czf dist/nockup-${CHANNEL}-latest-${{ matrix.target }}.tar.gz -C dist nockup
-            # Sign the archive if this is a release build
-            if [[ "$SHOULD_SIGN" == "true" ]]; then
-              gpg --batch --yes --pinentry-mode loopback --detach-sign --armor --default-key "${{ secrets.GPG_KEY_ID }}" dist/nockup-${CHANNEL}-latest-${{ matrix.target }}.tar.gz
             fi
           fi
           
@@ -241,7 +209,7 @@ jobs:
           SHA1_HASH=$(sha1sum "$ARCHIVE_PATH" 2>/dev/null | cut -d' ' -f1 || shasum -a 1 "$ARCHIVE_PATH" | cut -d' ' -f1)
           
           # Generate URL
-          URL="https://github.com/sigilante/nockchain/releases/download/$CHANNEL-build-$COMMIT_SHA/$BINARY-$CHANNEL-latest-$TARGET.tar.gz"
+          URL="https://github.com/nockchain/nockchain/releases/download/$CHANNEL-build-$COMMIT_SHA/$BINARY-$CHANNEL-latest-$TARGET.tar.gz"
           
           # Generate manifest
           cat << MANIFEST_EOF
@@ -272,10 +240,6 @@ jobs:
             ./scripts/generate-manifest.sh hoonc ${{ matrix.target }} "${CHANNEL}" "latest" > "hoonc-${{ matrix.target }}-manifest.toml"
             echo "Generated manifest for hoonc"
           fi
-          if [ -f "dist/nockup-${CHANNEL}-latest-${{ matrix.target }}.tar.gz" ]; then
-            ./scripts/generate-manifest.sh nockup ${{ matrix.target }} "${CHANNEL}" "latest" > "nockup-${{ matrix.target }}-manifest.toml"
-            echo "Generated manifest for nockup"
-          fi
 
       - name: Upload individual manifests
         if: steps.channel.outputs.channel != 'pr'
@@ -296,8 +260,6 @@ jobs:
             ${{ matrix.os == 'ubuntu-latest' && format('dist/hoon-{0}-latest-{2}.tar.gz.asc', steps.channel.outputs.channel, steps.cargo-versions.outputs.hoon_version, matrix.target) || '' }}
             dist/hoonc-${{ steps.channel.outputs.channel }}-latest-${{ matrix.target }}.tar.gz
             ${{ matrix.os == 'ubuntu-latest' && format('dist/hoonc-{0}-latest-{2}.tar.gz.asc', steps.channel.outputs.channel, steps.cargo-versions.outputs.hoonc_version, matrix.target) || '' }}
-            dist/nockup-${{ steps.channel.outputs.channel }}-latest-${{ matrix.target }}.tar.gz
-            ${{ matrix.os == 'ubuntu-latest' && format('dist/nockup-{0}-latest-{2}.tar.gz.asc', steps.channel.outputs.channel, steps.cargo-versions.outputs.nockup_version, matrix.target) || '' }}
 
   collate-manifests:
     name: Collate Channel Manifests
@@ -334,30 +296,10 @@ jobs:
           CHANNEL=$1
           MANIFEST_DIR=$2
           
-          # Get nockup version from the workspace
-          NOCKUP_VERSION=$(grep '^version[[:space:]]*=' crates/nockup/Cargo.toml | sed 's/.*=[[:space:]]*"\([^"]*\)".*/\1/' | head -1)
-          
-          if [ -z "$NOCKUP_VERSION" ]; then
-              echo "Error: Could not extract nockup version" >&2
-              exit 1
-          fi
-          
-          # For nightly, append date
-          if [[ "$CHANNEL" == "nightly" ]]; then
-            DATE=$(date +%Y%m%d)
-            NOCKUP_VERSION="${NOCKUP_VERSION}-${DATE}"
-          fi
-          
           # Start with global metadata
           cat << HEADER_EOF
           manifest-version = "1"
           date = "$(date +%Y-%m-%d)"
-          
-          # Global package info
-          [pkg.nockup]
-          version = "$NOCKUP_VERSION"
-          components = ["core"]
-          extensions = []
           
           # Profiles
           [profiles.default]
@@ -368,7 +310,7 @@ jobs:
           HEADER_EOF
           
           # Process manifests by package, then by target
-          for package in nockup hoonc hoon; do
+          for package in hoonc hoon; do
               echo "# $package binaries"
               
               # Find all manifests for this package
